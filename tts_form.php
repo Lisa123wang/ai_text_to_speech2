@@ -11,7 +11,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
         exit;
     }
 
-   
+    // 產生唯一檔名並執行 TTS 腳本
+    $filename = 'tts_' . uniqid() . '.mp3';
+    $full_path = __DIR__ . DIRECTORY_SEPARATOR . 'tts_tmp' . DIRECTORY_SEPARATOR . $filename;
 
     $cmd = sprintf('%s %s %s %s %s 2>&1',
         $python_path,
@@ -30,7 +32,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
         exit;
     }
 
-    
+    echo json_encode([
+        'success' => 1,
+        'mp3' => "tts_tmp/" . $filename,
+    ]);
     exit;
 }
 ?><!DOCTYPE html>
