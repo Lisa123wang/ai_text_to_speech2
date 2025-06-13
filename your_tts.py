@@ -1,36 +1,36 @@
-import re, requests, sys, subprocess, os, tempfile
-
-
+#!/usr/bin/env python3
+import re
+import requests
+import sys
+import subprocess
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 def split_text_phrases(text, max_len=55):
     SEP1 = r'[.!?]'
-    SEP2 = r'(,| and | but | or |且|而且|或者|但是|或是|，)'
+    SEP2 = r'(,| and | but | or | - | in | on | as | are | was，)'
     result = []
 
-    # 先按句末標點分句
+    # 1️⃣ 按句末标点分句
     sent_list = re.split(r'(?<=' + SEP1 + r')\s+', text.strip())
     for sent in sent_list:
         s = sent.strip()
         if not s:
             continue
 
-        # 只有長句才進行細分
         if len(s) > max_len:
-            # 1. 粗分：遇到逗號或連接詞就切
-            segs = []
-            last = 0
+            # 2️⃣ 第一次粗分
+            segs, last = [], 0
             for m in re.finditer(SEP2, s):
-                end = m.end()
-                segs.append(s[last:end].strip())
-                last = end
+                segs.append(s[last:m.end()].strip())
+                last = m.end()
             segs.append(s[last:].strip())
+            segs = [seg for seg in segs if seg]
 
-            # 2. 合併過短的片段
+            # 3️⃣ 合并过短片段
             merged = []
             for seg in segs:
-                if not seg:
-                    continue
-                # 根據是否含英文判斷「短」的標準
                 if re.search(r'[a-zA-Z]', seg):
                     is_short = len(seg.split()) < 3
                 else:
@@ -39,91 +39,115 @@ def split_text_phrases(text, max_len=55):
                     merged[-1] += ' ' + seg
                 else:
                     merged.append(seg)
+            merged = [m for m in merged if m]
 
-            # 3. 再檢查最後一片過短的，合併到前一片
+            # 4️⃣ 保护性合并最后过短片段
             if len(merged) >= 2:
                 last_seg = merged[-1]
-                if (re.search(r'[a-zA-Z]', last_seg) and len(last_seg.split()) < 3) or \
-                   (not re.search(r'[a-zA-Z]', last_seg) and len(last_seg) < 3):
-                    merged[-2] += ' ' + merged[-1]
-                    merged.pop()
+                too_short = (
+                    (re.search(r'[a-zA-Z]', last_seg) and len(last_seg.split()) < 3)
+                    or
+                    (not re.search(r'[a-zA-Z]', last_seg) and len(last_seg) < 3)
+                )
+                if too_short:
+                    try:
+                        merged[-2] += ' ' + merged.pop()
+                    except IndexError:
+                        pass
 
-            # 4. 對仍然超長的段落，再強制按長度拆一次
+            # 5️⃣ 对仍然超长的 merged 段再按长度拆分
             chunks = []
             for chunk in merged:
                 if len(chunk) > max_len:
                     words = chunk.split()
-                    curlen = 0
-                    curr = []
-                    segments = []
+                    curr, curlen, parts = [], 0, []
                     for w in words:
                         if curlen + len(w) + 1 > max_len:
-                            segments.append(' '.join(curr))
-                            curr = [w]
-                            curlen = len(w)
+                            parts.append(' '.join(curr))
+                            curr, curlen = [w], len(w)
                         else:
                             curr.append(w)
                             curlen += len(w) + 1
                     if curr:
-                        segments.append(' '.join(curr))
-
-                    # 合併最後過短的子段
-                    if len(segments) >= 2 and len(segments[-1].split()) < 3:
-                        segments[-2] += ' ' + segments[-1]
-                        segments.pop()
-
-                    chunks.extend(segments)
+                        parts.append(' '.join(curr))
+                    # 5.1️⃣ 合并最后过短子段
+                    if len(parts) >= 2:
+                        last_p = parts[-1]
+                        too_short_p = (
+                            (re.search(r'[a-zA-Z]', last_p) and len(last_p.split()) < 3)
+                            or
+                            (not re.search(r'[a-zA-Z]', last_p) and len(last_p) < 3)
+                        )
+                        if too_short_p:
+                            try:
+                                parts[-2] += ' ' + parts.pop()
+                            except IndexError:
+                                pass
+                    chunks.extend(parts)
                 else:
                     chunks.append(chunk.strip())
 
-            # 5. 把這些 chunk 放入結果
+            # 6️⃣ 收集
             result.extend(chunks)
-
-            # 6. 只有真的拆成多段時，才再讀一次完整句
+            # 7️⃣ 如果拆成多段，再保留原句
             if len(chunks) > 1:
                 result.append(s)
         else:
-            # 短句直接一次讀完
             result.append(s)
 
-    # 避免空字串
     return [x for x in result if x]
 
-
-
 def get_silence_sec(sentence):
-    # 可自訂：以每15字為一秒
-    return max(1, len(sentence)//10)
+    # 每 10 字約 1 秒，至少 1 秒
+    return max(1, len(sentence) // 10)
 
-if len(sys.argv)<4:
-    print("Usage: python your_tts.py 'text' 'voice' 'outfile'")
+# ─── 主流程 ─────────────────────────────────────────────
+
+if len(sys.argv) < 4:
+    print("Usage: python your_tts.py <input_txt_or_text> <voice> <output_mp3>")
     sys.exit(1)
 
-text, voice, outputfile = sys.argv[1], sys.argv[2], sys.argv[3]
-api_key = "API"
+arg, voice, outputfile = sys.argv[1], sys.argv[2], sys.argv[3]
 
+# 讀取文字或檔案
+if os.path.isfile(arg):
+    with open(arg, 'r', encoding='utf-8') as f:
+        text = f.read()
+else:
+    text = arg
+
+# OpenAI API Key
+api_key = "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"  # 請替換成自己的
 headers = {
     "Authorization": f"Bearer {api_key}",
     "Content-Type": "application/json"
 }
 
-# 用進階分段 & 子句結尾句都會出現在語音中
-phrases = split_text_phrases(text, max_len=55)
-
+# 切段
+phrases = split_text_phrases(text)
 tmp_dir = tempfile.gettempdir()
-mp3files = []
+max_workers = 20  # 可調：同時送幾個請求
 
-for idx, sent in enumerate(phrases):
-    # 跳空片段
+def process_phrase(idx, sent):
+    """對單一段做 TTS，並回傳 mp3 路徑列表（語音＋靜音）"""
+    files = []
     if not sent.strip():
-        continue
+        return files
+
+    # 1️⃣ 呼叫 OpenAI TTS
     payload = {"model": "tts-1", "voice": voice, "input": sent}
-    response = requests.post("https://api.openai.com/v1/audio/speech", headers=headers, json=payload)
-    mp3 = os.path.join(tmp_dir, f"part_{os.getpid()}_{idx}.mp3")
-    with open(mp3, "wb") as f:
-        f.write(response.content)
-    mp3files.append(mp3)
-    # 靜音暫存(句末才不加)
+    resp = requests.post("https://api.openai.com/v1/audio/speech", headers=headers, json=payload)
+    if resp.status_code != 200:
+        sys.stderr.write(f"[ERROR] segment {idx} → {resp.status_code}\n{resp.text}\n")
+        sys.exit(1)
+
+    # 2️⃣ 存語音檔
+    part_mp3 = os.path.join(tmp_dir, f"part_{os.getpid()}_{idx}.mp3")
+    with open(part_mp3, 'wb') as fw:
+        fw.write(resp.content)
+    files.append(part_mp3)
+
+    # 3️⃣ 如果不是最後一段，就產生並加上靜音
     if idx != len(phrases) - 1:
         sec = get_silence_sec(sent)
         silence_mp3 = os.path.join(tmp_dir, f"silence_{os.getpid()}_{idx}.mp3")
@@ -133,10 +157,25 @@ for idx, sent in enumerate(phrases):
             "-t", str(sec),
             "-q:a", "9", "-acodec", "libmp3lame", silence_mp3
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        mp3files.append(silence_mp3)
+        files.append(silence_mp3)
 
+    return files
+
+# ─── 並行執行 TTS ───────────────────────────────────────
+mp3files = []
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # 提交所有任務
+    future_by_idx = {
+        idx: executor.submit(process_phrase, idx, sent)
+        for idx, sent in enumerate(phrases)
+    }
+    # 按照原始順序收結果
+    for idx in range(len(phrases)):
+        mp3files.extend(future_by_idx[idx].result())
+
+# ─── 合併所有片段 ───────────────────────────────────────
 concat_txt = os.path.join(tmp_dir, f"{os.getpid()}.txt")
-with open(concat_txt, "w", encoding='utf-8') as f:
+with open(concat_txt, 'w', encoding='utf-8') as f:
     for fn in mp3files:
         f.write(f"file '{fn}'\n")
 
@@ -146,3 +185,4 @@ subprocess.run([
     "-acodec", "libmp3lame", "-ar", "44100", "-ab", "192k", outputfile
 ], check=True)
 
+print(f"合併完成：{outputfile}")
