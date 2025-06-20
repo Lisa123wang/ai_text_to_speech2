@@ -17,7 +17,7 @@ import shutil
 
 
 # 预编译正则，减少重复编译开销
-_SENTENCE_PATTERN = re.compile(r'.+?[\.!\?](?=\s|$)')
+_SENTENCE_PATTERN = re.compile(r'.+?(?<!\b[A-Za-z])[\.\!\?](?=\s|$)')
 _PUNCT_PATTERN    = re.compile(r'(?:,|—)\s*')
 _CONN_PATTERN     = re.compile(r'\s+(?:and|but|or|so|yet|nor|because|although|though|if|while|for)\b')
 
@@ -125,7 +125,6 @@ else:
     text = arg
 
 # OpenAI API Key
-api_key = "API"  # 請替換成自己的
 headers = {
     "Authorization": f"Bearer {api_key}",
     "Content-Type": "application/json"
