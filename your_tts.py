@@ -12,80 +12,95 @@ import shutil
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import re
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-def split_text_phrases(text, max_len=12, short_threshold=6):
+
+# 预编译正则，减少重复编译开销
+_SENTENCE_PATTERN = re.compile(r'.+?[\.!\?](?=\s|$)')
+_PUNCT_PATTERN    = re.compile(r'(?:,|—)\s*')
+_CONN_PATTERN     = re.compile(r'\s+(?:and|but|or|so|yet|nor|because|although|though|if|while|for)\b')
+
+def split_text_phrases(text, max_words=12, short_threshold_words=6):
     """
     英文句子按“单词数”拆分，并在多段拆分后重读原句：
       1. 用 [.?!] 抓完整原句
-      2. 如果单词数 <= max_len，直接保留
+      2. 如果单词数 <= max_words，直接保留
       3. 否则先按标点(逗号/破折号)拆分
-         - 拆出来的片段如果单词数 >= short_threshold，再按连接词拆
-      4. 对所有仍超长的片段按单词边界强制拆成每段不超过 max_len
-      5. 如果最终拆出了多段，末尾附上原句一次
+         - 拆出来的片段如果单词数 >= short_threshold_words，再按连接词拆
+      4. 对所有仍超长的片段按单词边界强制拆成每段不超过 max_words
+      5. 末段过短就合并到前一段
+      6. 如果最终拆出了多段，末尾附上原句一次
     """
     if not text or not text.strip():
         return []
 
-    # 1. 提取带终点标点的完整句子
-    sentence_pattern = re.compile(r'.+?[\.!\?](?=\s|$)')
-    sentences = sentence_pattern.findall(text.strip())
-
-    PUNCT_SEP = r'(?:,|—)\s*'
-    CONN_SEP  = r'\s+(?:and|but|or|so|yet|nor|because|although|though|if|while)\b'
+    # 本地绑定加速调用
+    find_sentences = _SENTENCE_PATTERN.findall
+    punct_split    = _PUNCT_PATTERN.split
+    conn_split     = _CONN_PATTERN.split
 
     result = []
-    for sent in sentences:
+    for sent in find_sentences(text):
         sent = sent.strip()
         words = sent.split()
-
-        # 2. 单词数不超限，直接保留
-        if len(words) <= max_len:
+        # 2. 单词数不超限
+        if len(words) <= max_words:
             result.append(sent)
             continue
 
-        # 3. 分层拆：先按标点，再按连接词（条件触发）
-        parts = re.split(PUNCT_SEP, sent)
+        # 3. 按标点拆
         refined = []
-        for part in parts:
+        for part in punct_split(sent):
             part = part.strip()
             if not part:
                 continue
             pw = len(part.split())
-            if pw <= max_len:
+            if pw <= max_words:
                 refined.append(part)
+            elif pw >= short_threshold_words:
+                # 按连接词再拆
+                refined.extend(s.strip() for s in conn_split(part) if s.strip())
             else:
-                if pw >= short_threshold:
-                    # 按连接词再拆
-                    subs = re.split(CONN_SEP, part)
-                    refined.extend(s.strip() for s in subs if s.strip())
-                else:
-                    refined.append(part)
+                refined.append(part)
 
-        # 4. 对仍然超长的片段，按单词边界强拆
+        # 4. 强制按单词边界拆超长段
         local_chunks = []
+        append_chunk = local_chunks.append
         for seg in refined:
             seg_words = seg.split()
-            if len(seg_words) <= max_len:
-                local_chunks.append(seg)
+            if len(seg_words) <= max_words:
+                append_chunk(seg)
             else:
                 buf = []
                 for w in seg_words:
-                    # 若加入下一个单词会超出，就先 flush
-                    if buf and len(buf) + 1 > max_len:
-                        local_chunks.append(' '.join(buf))
+                    if buf and len(buf) + 1 > max_words:
+                        append_chunk(' '.join(buf))
                         buf = [w]
                     else:
                         buf.append(w)
                 if buf:
-                    local_chunks.append(' '.join(buf))
+                    append_chunk(' '.join(buf))
 
-        # 5. 收集结果，若拆出多段则重读原句
+        # 5. 合并过短末段
+        merged = []
+        for seg in local_chunks:
+            if not merged:
+                merged.append(seg)
+            else:
+                if len(seg.split()) < short_threshold_words:
+                    merged[-1] += ' ' + seg
+                else:
+                    merged.append(seg)
+        local_chunks = merged
+
+        # 6. 收集结果并原句重读
         result.extend(local_chunks)
         if len(local_chunks) > 1:
             result.append(sent)
 
     return [r for r in result if r.strip()]
+
 
 
 
@@ -110,7 +125,7 @@ else:
     text = arg
 
 # OpenAI API Key
-api_key = "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"  # 請替換成自己的
+api_key = "API"  # 請替換成自己的
 headers = {
     "Authorization": f"Bearer {api_key}",
     "Content-Type": "application/json"
