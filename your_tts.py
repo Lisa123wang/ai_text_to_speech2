@@ -8,95 +8,87 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import shutil
 
-def split_text_phrases(text, max_len=55):
-    SEP1 = r'[.!?]'
-    SEP2 = r'(,| and | but | or | - | in | on | as | are | was，)'
-    result = []
 
-    # 1️⃣ 按句末標點分句
-    sent_list = re.split(r'(?<=' + SEP1 + r')\s+', text.strip())
-    for sent in sent_list:
-        s = sent.strip()
-        if not s:
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import re
+
+def split_text_phrases(text, max_len=12, short_threshold=6):
+    """
+    英文句子按“单词数”拆分，并在多段拆分后重读原句：
+      1. 用 [.?!] 抓完整原句
+      2. 如果单词数 <= max_len，直接保留
+      3. 否则先按标点(逗号/破折号)拆分
+         - 拆出来的片段如果单词数 >= short_threshold，再按连接词拆
+      4. 对所有仍超长的片段按单词边界强制拆成每段不超过 max_len
+      5. 如果最终拆出了多段，末尾附上原句一次
+    """
+    if not text or not text.strip():
+        return []
+
+    # 1. 提取带终点标点的完整句子
+    sentence_pattern = re.compile(r'.+?[\.!\?](?=\s|$)')
+    sentences = sentence_pattern.findall(text.strip())
+
+    PUNCT_SEP = r'(?:,|—)\s*'
+    CONN_SEP  = r'\s+(?:and|but|or|so|yet|nor|because|although|though|if|while)\b'
+
+    result = []
+    for sent in sentences:
+        sent = sent.strip()
+        words = sent.split()
+
+        # 2. 单词数不超限，直接保留
+        if len(words) <= max_len:
+            result.append(sent)
             continue
 
-        if len(s) > max_len:
-            # 2️⃣ 第一次粗分
-            segs, last = [], 0
-            for m in re.finditer(SEP2, s):
-                segs.append(s[last:m.end()].strip())
-                last = m.end()
-            segs.append(s[last:].strip())
-            segs = [seg for seg in segs if seg]
-
-            # 3️⃣ 合併過短片段
-            merged = []
-            for seg in segs:
-                if re.search(r'[a-zA-Z]', seg):
-                    is_short = len(seg.split()) < 3
+        # 3. 分层拆：先按标点，再按连接词（条件触发）
+        parts = re.split(PUNCT_SEP, sent)
+        refined = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            pw = len(part.split())
+            if pw <= max_len:
+                refined.append(part)
+            else:
+                if pw >= short_threshold:
+                    # 按连接词再拆
+                    subs = re.split(CONN_SEP, part)
+                    refined.extend(s.strip() for s in subs if s.strip())
                 else:
-                    is_short = len(seg) < 3
-                if is_short and merged:
-                    merged[-1] += ' ' + seg
-                else:
-                    merged.append(seg)
-            merged = [m for m in merged if m]
+                    refined.append(part)
 
-            # 4️⃣ 保護性合併最後過短片段
-            if len(merged) >= 2:
-                last_seg = merged[-1]
-                too_short = (
-                    (re.search(r'[a-zA-Z]', last_seg) and len(last_seg.split()) < 3)
-                    or
-                    (not re.search(r'[a-zA-Z]', last_seg) and len(last_seg) < 3)
-                )
-                if too_short:
-                    try:
-                        merged[-2] += ' ' + merged.pop()
-                    except IndexError:
-                        pass
+        # 4. 对仍然超长的片段，按单词边界强拆
+        local_chunks = []
+        for seg in refined:
+            seg_words = seg.split()
+            if len(seg_words) <= max_len:
+                local_chunks.append(seg)
+            else:
+                buf = []
+                for w in seg_words:
+                    # 若加入下一个单词会超出，就先 flush
+                    if buf and len(buf) + 1 > max_len:
+                        local_chunks.append(' '.join(buf))
+                        buf = [w]
+                    else:
+                        buf.append(w)
+                if buf:
+                    local_chunks.append(' '.join(buf))
 
-            # 5️⃣ 對仍然超長的 merged 段再按長度拆分
-            chunks = []
-            for chunk in merged:
-                if len(chunk) > max_len:
-                    words = chunk.split()
-                    curr, curlen, parts = [], 0, []
-                    for w in words:
-                        if curlen + len(w) + 1 > max_len:
-                            parts.append(' '.join(curr))
-                            curr, curlen = [w], len(w)
-                        else:
-                            curr.append(w)
-                            curlen += len(w) + 1
-                    if curr:
-                        parts.append(' '.join(curr))
-                    # 5.1️⃣ 合併最後過短子段
-                    if len(parts) >= 2:
-                        last_p = parts[-1]
-                        too_short_p = (
-                            (re.search(r'[a-zA-Z]', last_p) and len(last_p.split()) < 3)
-                            or
-                            (not re.search(r'[a-zA-Z]', last_p) and len(last_p) < 3)
-                        )
-                        if too_short_p:
-                            try:
-                                parts[-2] += ' ' + parts.pop()
-                            except IndexError:
-                                pass
-                    chunks.extend(parts)
-                else:
-                    chunks.append(chunk.strip())
+        # 5. 收集结果，若拆出多段则重读原句
+        result.extend(local_chunks)
+        if len(local_chunks) > 1:
+            result.append(sent)
 
-            # 6️⃣ 收集
-            result.extend(chunks)
-            # 7️⃣ 如果拆成多段，再保留原句
-            if len(chunks) > 1:
-                result.append(s)
-        else:
-            result.append(s)
+    return [r for r in result if r.strip()]
 
-    return [x for x in result if x]
+
+
 
 def get_silence_sec(sentence):
     # 每 10 字約 1 秒，至少 0.5 秒（減少靜音時間）
